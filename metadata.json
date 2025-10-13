@@ -1,0 +1,5 @@
+{
+  "name": "Rechek",
+  "description": "An app to check the correct pressures and temperatures for commercial freezers and refrigerators.",
+  "requestFramePermissions": []
+}
