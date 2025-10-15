@@ -1,3 +1,4 @@
+
 /**
  * @license
  * SPDX-License-Identifier: Apache-2.0
@@ -6,6 +7,73 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
 import { GoogleGenAI, Type } from '@google/genai';
+
+const PressureGauge = ({ title, actual, target, min, max, unit }) => {
+    const clamp = (value, min, max) => Math.max(min, Math.min(value, max));
+
+    const actualClamped = clamp(actual, min, max);
+    const targetClamped = clamp(target, min, max);
+
+    const valueToAngle = (value) => {
+        return ((clamp(value, min, max) - min) / (max - min)) * 180 - 90;
+    };
+
+    const angleToCoordinates = (angle, radius) => {
+        const rad = (angle * Math.PI) / 180;
+        return [50 + radius * Math.cos(rad), 50 + radius * Math.sin(rad)];
+    };
+
+    const needleAngle = valueToAngle(actualClamped);
+    const targetAngle = valueToAngle(targetClamped);
+
+    // Define a "good" range, e.g., +/- 5% of the max-min range
+    const range = max - min;
+    const goodZoneWidth = range * 0.10; // 10% of total range for the green zone
+    const targetMinus = clamp(target - (goodZoneWidth / 2), min, max);
+    const targetPlus = clamp(target + (goodZoneWidth / 2), min, max);
+    const goodZoneStartAngle = valueToAngle(targetMinus);
+    const goodZoneEndAngle = valueToAngle(targetPlus);
+
+    const describeArc = (x, y, radius, startAngle, endAngle) => {
+        const start = angleToCoordinates(startAngle, radius);
+        const end = angleToCoordinates(endAngle, radius);
+        const largeArcFlag = endAngle - startAngle <= 180 ? "0" : "1";
+        return `M ${start[0]} ${start[1]} A ${radius} ${radius} 0 ${largeArcFlag} 1 ${end[0]} ${end[1]}`;
+    };
+
+    return (
+        <div className="gauge-card">
+            <h3>{title}</h3>
+            <svg viewBox="0 0 100 60" className="gauge-svg" role="img" aria-label={`${title} gauge reading ${actual} ${unit}`}>
+                {/* Background Arc */}
+                <path d={describeArc(50, 50, 40, -90, 90)} fill="none" stroke="#e0e0e0" strokeWidth="8" strokeLinecap="round" />
+
+                {/* Good Zone Arc */}
+                <path d={describeArc(50, 50, 40, goodZoneStartAngle, goodZoneEndAngle)} fill="none" stroke="#2ecc71" strokeWidth="8" strokeLinecap="round" />
+                
+                {/* Needle */}
+                <g transform={`rotate(${needleAngle} 50 50)`}>
+                    <path d="M 50 50 L 50 15" stroke="#34495e" strokeWidth="2" strokeLinecap="round" />
+                    <circle cx="50" cy="50" r="4" fill="#34495e" />
+                </g>
+
+                {/* Value Text */}
+                <text x="50" y="45" textAnchor="middle" className="gauge-value">{Math.round(actual)}</text>
+                <text x="50" y="55" textAnchor="middle" className="gauge-unit">{unit}</text>
+                
+                {/* Min/Max Labels */}
+                <text x="10" y="58" textAnchor="middle" className="gauge-label">{min}</text>
+                <text x="90" y="58" textAnchor="middle" className="gauge-label">{max}</text>
+                
+                {/* Target Label */}
+                <text x={angleToCoordinates(targetAngle, 48)[0]} y={angleToCoordinates(targetAngle, 48)[1] + 3} textAnchor="middle" className="gauge-target-label" fill="#2ecc71">
+                   🎯 {Math.round(target)}
+                </text>
+            </svg>
+        </div>
+    );
+};
+
 
 const App = () => {
   const [unitType, setUnitType] = useState('Refrigerator');
@@ -23,6 +91,9 @@ const App = () => {
   const [history, setHistory] = useState([]);
   const [isManufacturerDropdownOpen, setIsManufacturerDropdownOpen] = useState(false);
   const [installPrompt, setInstallPrompt] = useState(null);
+  const [isGeneratingGuide, setIsGeneratingGuide] = useState(false);
+  const [repairGuide, setRepairGuide] = useState(null);
+  const [guideError, setGuideError] = useState('');
   const manufacturerDropdownRef = useRef(null);
 
   const refrigerants = [
@@ -302,6 +373,8 @@ const App = () => {
     setLoading(true);
     setError('');
     setResults(null);
+    setRepairGuide(null);
+    setGuideError('');
     
     const refPressureInfo = refrigerantInfo[refrigerant]
         ? `(Note: This refrigerant has a reference pressure of ${refrigerantInfo[refrigerant].pressureAt25F} PSIG at 25°F)`
@@ -337,19 +410,13 @@ const App = () => {
       5. Target high-side (head) pressure in PSIG.
       6. A brief diagnosis explaining if the current state is acceptable for the given box temperature and what the pressures indicate.
       7. Analyze the data for signs of a potential refrigerant leak. Provide a leak potential rating (Low, Medium, or High) and a brief reasoning. A key indicator would be significantly lower-than-expected suction pressure for the required coil temperature to achieve the given box temperature.
-      
-      PART 2: IDEAL EQUIPMENT SPECS (independent of actual readings)
-      Provide the ideal "textbook" operating specifications for this equipment type running at its standard target temperature (e.g., ~38F for a refrigerator, ~0F for a freezer). If specific manufacturer data is provided, prioritize it.
-      8. Ideal box temperature range.
-      9. Ideal low-side (suction) pressure.
-      10. Ideal high-side (head) pressure.
 
       ${(actualLowPressure && actualHighPressure) ? `
-      PART 3: DIAGNOSIS WITH ACTUAL READINGS
+      PART 2: DIAGNOSIS WITH ACTUAL READINGS
       The system's actual measured pressures are ${actualLowPressure} PSIG on the low-side and ${actualHighPressure} PSIG on the high-side.
-      11. Based on these actual readings compared to the targets from PART 1, determine the refrigerant charge status (e.g., Undercharged, Overcharged, Appears Correct).
-      12. Provide a single, brief, actionable piece of advice corresponding to the charge status.
-      13. Provide a list of any OTHER specific, actionable repair suggestions or further diagnostic steps to take (do not include charge advice here).
+      8. Based on these actual readings compared to the targets from PART 1, determine the refrigerant charge status (e.g., Undercharged, Overcharged, Appears Correct).
+      9. Provide a single, brief, actionable piece of advice corresponding to the charge status.
+      10. Provide a list of any OTHER specific, actionable repair suggestions or further diagnostic steps to take (do not include charge advice here).
       ` : ''}
     `;
 
@@ -388,18 +455,6 @@ const App = () => {
               type: Type.STRING,
               description: "A brief explanation for the leak potential assessment."
           },
-          idealBoxTemp: {
-              type: Type.STRING,
-              description: "The ideal 'textbook' box temperature range for this equipment type, e.g., '35°F - 40°F'."
-          },
-          idealLowSidePsig: {
-              type: Type.STRING,
-              description: "The ideal 'textbook' low-side pressure for this equipment type under standard conditions."
-          },
-          idealHighSidePsig: {
-              type: Type.STRING,
-              description: "The ideal 'textbook' high-side pressure for this equipment type under standard conditions."
-          },
           chargeStatus: {
               type: Type.STRING,
               description: "The determined refrigerant charge status (e.g., 'Undercharged', 'Overcharged', 'Appears Correct'). Only provide this if actual pressures are given."
@@ -414,7 +469,7 @@ const App = () => {
               items: { type: Type.STRING }
           }
       },
-      required: ["targetBoxTemp", "targetCoilTemp", "targetDeltaT", "targetLowSidePsig", "targetHighSidePsig", "diagnosis", "leakPotential", "leakReasoning", "idealBoxTemp", "idealLowSidePsig", "idealHighSidePsig"],
+      required: ["targetBoxTemp", "targetCoilTemp", "targetDeltaT", "targetLowSidePsig", "targetHighSidePsig", "diagnosis", "leakPotential", "leakReasoning"],
     };
 
     try {
@@ -440,6 +495,7 @@ const App = () => {
               id: Date.now(),
               query: { unitType, systemType, refrigerant, boxTemp, ambientTemp, actualLowPressure, actualHighPressure, manufacturer, model },
               result: parsedResult,
+              repairGuide: null,
             };
             setHistory(prevHistory => [newHistoryItem, ...prevHistory.filter(item => 
                 JSON.stringify(item.query) !== JSON.stringify(newHistoryItem.query)
@@ -474,6 +530,68 @@ const App = () => {
       setLoading(false);
     }
   };
+  
+  const handleGenerateGuide = async () => {
+      if (!results) return;
+
+      setIsGeneratingGuide(true);
+      setGuideError('');
+      setRepairGuide(null);
+
+      const prompt = `
+        Act as a master HVAC/R training instructor providing guidance to a field technician.
+
+        **System Information:**
+        - Unit: ${manufacturer} ${model} (${systemType} ${unitType})
+        - Refrigerant: ${refrigerant}
+        - Ambient Temperature: ${ambientTemp}°F
+        - Box Temperature: ${boxTemp}°F
+        - Actual Low-Side Pressure: ${actualLowPressure || 'N/A'} PSIG
+        - Actual High-Side Pressure: ${actualHighPressure || 'N/A'} PSIG
+
+        **Initial AI Diagnosis Summary:**
+        - Charge Status: ${results.chargeStatus || 'Not determined'}
+        - Primary Diagnosis: ${results.diagnosis}
+        - Leak Potential: ${results.leakPotential}
+        - Initial Suggestions: ${results.repairSuggestions?.join(', ') || 'None'}
+
+        **Your Task:**
+        Based on all the information above, generate a clear, concise, step-by-step repair guide for the **most likely root cause**. 
+        - Format the guide for a mobile screen.
+        - Start with a clear "## Safety First" section.
+        - Use markdown-style headers (e.g., "## Step 1: Initial Verification") and bullet points for clarity.
+        - The guide must be practical and actionable for a trained technician with standard tools.
+        - Conclude with a "## Final Checks" section.
+      `;
+
+      try {
+          const response = await ai.models.generateContent({
+              model: "gemini-2.5-flash",
+              contents: prompt,
+          });
+
+          if (response.text) {
+              const newGuide = response.text;
+              setRepairGuide(newGuide);
+              // Update the latest history item with the generated guide
+              setHistory(prevHistory => {
+                  const latestItem = prevHistory[0];
+                  if (latestItem && JSON.stringify(latestItem.result) === JSON.stringify(results)) {
+                      const updatedItem = { ...latestItem, repairGuide: newGuide };
+                      return [updatedItem, ...prevHistory.slice(1)];
+                  }
+                  return prevHistory;
+              });
+          } else {
+              setGuideError('The AI returned an empty guide. Please try again.');
+          }
+      } catch (err) {
+          console.error("Guide Generation API Error:", err);
+          setGuideError('An error occurred while generating the repair guide. Please try again.');
+      } finally {
+          setIsGeneratingGuide(false);
+      }
+  };
 
   const handleHistoryClick = (item) => {
     setUnitType(item.query.unitType);
@@ -486,7 +604,9 @@ const App = () => {
     setActualLowPressure(item.query.actualLowPressure || '');
     setActualHighPressure(item.query.actualHighPressure || '');
     setResults(item.result);
+    setRepairGuide(item.repairGuide || null);
     setError('');
+    setGuideError('');
     const formTop = document.querySelector('.card');
     if (formTop) {
         formTop.scrollIntoView({ behavior: 'smooth' });
@@ -506,6 +626,11 @@ const App = () => {
         </div>
     </div>
   );
+  
+  const parseTargetPressure = (pressureString) => {
+      if (!pressureString) return NaN;
+      return parseFloat(pressureString.replace(/[^0-9.]/g, ''));
+  };
 
   const isModelSpecific = manufacturer !== 'Generic/Other' && model !== 'Generic/Other';
 
@@ -654,19 +779,29 @@ const App = () => {
         {results && (
           <section className="results-section" aria-live="polite">
             <h2>Results for {manufacturer !== 'Generic/Other' ? `${manufacturer} ${model}` : `${systemType} ${unitType}`} ({refrigerant})</h2>
-            
-            {(actualLowPressure || actualHighPressure) && (
-            <div className="results-group">
-              <h3>Your Readings</h3>
-              <div className="results-grid">
-                  {actualLowPressure && (
-                    <ResultCard icon="📉" title="Actual Suction Pressure" value={`${actualLowPressure} PSIG`} />
-                  )}
-                  {actualHighPressure && (
-                    <ResultCard icon="📈" title="Actual Head Pressure" value={`${actualHighPressure} PSIG`} />
-                  )}
-              </div>
-            </div>
+
+            {actualLowPressure && actualHighPressure && (
+                <div className="results-group">
+                    <h3>Pressure Analysis Gauges</h3>
+                    <div className="gauge-grid">
+                        <PressureGauge
+                            title="Low Side (Suction)"
+                            actual={parseFloat(actualLowPressure)}
+                            target={parseTargetPressure(results.targetLowSidePsig)}
+                            min={0}
+                            max={150}
+                            unit="PSIG"
+                        />
+                        <PressureGauge
+                            title="High Side (Head)"
+                            actual={parseFloat(actualHighPressure)}
+                            target={parseTargetPressure(results.targetHighSidePsig)}
+                            min={100}
+                            max={500}
+                            unit="PSIG"
+                        />
+                    </div>
+                </div>
             )}
             
             <div className="results-group">
@@ -680,15 +815,6 @@ const App = () => {
                 </div>
             </div>
 
-            <div className="results-group">
-                <h3>Ideal Specs for this Equipment</h3>
-                <div className="results-grid">
-                    <ResultCard icon="🌡️" title="Ideal Box Temp Range" value={results.idealBoxTemp} />
-                    <ResultCard icon="📉" title="Ideal Suction Pressure" value={results.idealLowSidePsig} />
-                    <ResultCard icon="📈" title="Ideal Head Pressure" value={results.idealHighSidePsig} />
-                </div>
-            </div>
-            
             <div className="diagnosis-result">
                 <h3>Diagnosis</h3>
                 <p>{results.diagnosis}</p>
@@ -719,6 +845,24 @@ const App = () => {
                 </ul>
               </div>
             )}
+
+            <div className="repair-guide-container">
+                <button
+                    className="generate-guide-button"
+                    onClick={handleGenerateGuide}
+                    disabled={isGeneratingGuide}
+                >
+                    {isGeneratingGuide ? <div className="spinner"></div> : 'Generate Repair Guide'}
+                </button>
+                {guideError && <div className="error-message">{guideError}</div>}
+                {repairGuide && (
+                    <div className="repair-guide-result">
+                        <h3><span role="img" aria-label="scroll">📜</span> Step-by-Step Repair Guide</h3>
+                        <div className="repair-guide-content" dangerouslySetInnerHTML={{ __html: repairGuide.replace(/## (.*)/g, '<h4>$1</h4>').replace(/\* (.*)/g, '<li>$1</li>').replace(/\n/g, '<br />') }}>
+                        </div>
+                    </div>
+                )}
+            </div>
           </section>
         )}
          <footer className="disclaimer">
